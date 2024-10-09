@@ -1,0 +1,13 @@
+---
+Parameters:
+  - ParameterKey:   AuthorizedUserArns
+    ParameterValue: "buildawsaccountnumber" # Principals that can access the StackOps installation and member account admin roles
+  - ParameterKey:   ApplicationLicenseKey
+    ParameterValue: yourLicenseKeyfrom https://service.stackops.ngin.global
+  - { ParameterKey: LogLevelServer,       ParameterValue: ERROR } # or DEBUG or INFO or WARN
+  - { ParameterKey: LogLevelUI,           ParameterValue: ERROR }
+  - { ParameterKey: LogData,              ParameterValue: "off" } # or "on"
+  - { ParameterKey: StackOpsVersion,      ParameterValue: latest }
+Capabilities: [ CAPABILITY_NAMED_IAM ]
+
+

@@ -1,0 +1,1 @@
+Capabilities: [ CAPABILITY_NAMED_IAM ] # required for the stack to create IAM roles

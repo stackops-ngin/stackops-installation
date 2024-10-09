@@ -1,0 +1,20 @@
+NginStackOpsDeploymentFormatVersion: '2022-09-07'
+Description:                         StackOps installation with IAM Roles (access and execution)
+LinkOutputsToParameters:             true # link PrincipalsAuthorized from stackops stack to IAM Role stacks
+PauseBeforeDependents:               false # automatically create the IAM roles after the stackops stack is created
+AccountAccessRoleArns:
+  #   branch  alias   cfn execution role arn for member accounts
+  - [ main,   build,  arn:aws:iam::111111111111:role/OrganizationAccountAccessRole ]
+  - [ main,   dev,    arn:aws:iam::222222222222:role/OrganizationAccountAccessRole ]
+  - [ main,   test,   arn:aws:iam::333333333333:role/OrganizationAccountAccessRole ]
+  - [ main,   prod,   arn:aws:iam::444444444444:role/OrganizationAccountAccessRole ] # account for build and management tools
+Stacks:
+  #  alias          region          stack name    template path,               parameter file path
+  # StackOps installation to manage build, dev, test and prod
+  - [ build,        ap-southeast-2, stackops,     templates/stackops.yaml,      params/stackops-config.yml ]
+  # Roles to use in deployment files for the above StackOps installation...
+  - [ build,        ap-southeast-2, admin-access, templates/iam-role-admin.yml, params/capability-named-iam.yml ]
+  - [ dev,          ap-southeast-2, admin-access, templates/iam-role-admin.yml, params/capability-named-iam.yml ]
+  - [ test,         ap-southeast-2, admin-access, templates/iam-role-admin.yml, params/capability-named-iam.yml ]
+  - [ prod,         ap-southeast-2, admin-access, templates/iam-role-admin.yml, params/capability-named-iam.yml ]
+

@@ -1,0 +1,286 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description:              A serverless application to run and monitor CloudFormation templates across accounts
+Parameters:
+  ApplicationLicenseKey:
+    Type:        String
+    Description: License key obtained from StackOps Service application
+    MinLength:   32
+  AuthorizedUserArns:
+    Type:        CommaDelimitedList
+    Description: >
+                 Comma separated list of AWS Principals (account numbers, user arns, role arns, role session arns) to be granted access 
+                 to this instance of StackOps. These AWS Principals are added to the trust policy of an IAM role.
+  LogLevelServer:
+    Type:        String
+    Description: Log level for server - Error Warn Info Debug
+    AllowedValues: [ 'ERROR', 'WARN', 'INFO', 'DEBUG' ]
+    Default:     ERROR
+  LogLevelUI:
+    Type:        String
+    Description: Log level for ui - Error Warn Info Debug
+    AllowedValues: [ 'ERROR', 'WARN', 'INFO', 'DEBUG' ]
+    Default:     ERROR
+  LogData:
+    Type:        String
+    Description: Log data for debug purposes - off for production for data protection
+    AllowedValues: [ 'on', 'off' ]
+    Default:     'off'
+  StackOpsVersion:
+    Type:        String
+    Description: Version of StackOps code to deploy - default gets the latest code available at the time of Stack creation
+    Default:     latest
+Conditions:
+  UseLatestLambdaCode: !Equals [ !Ref StackOpsVersion, latest ]
+Resources:
+  DynamoDb:
+    Type: AWS::DynamoDB::Table
+    Properties:
+      TableName: !Join [ '-', [ !Ref AWS::StackName, !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ] ] ]
+      BillingMode: PAY_PER_REQUEST
+      AttributeDefinitions: [ { AttributeName: PartitionK, AttributeType: S }, { AttributeName: SortK, AttributeType: S } ]
+      KeySchema: [ { AttributeName: PartitionK, KeyType: HASH }, { AttributeName: SortK, KeyType: RANGE } ]
+  S3WorkingStorage:
+    Type: AWS::S3::Bucket
+    Properties:
+      BucketName: !Join [ '-', [ !Ref AWS::StackName, !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ] ] ]
+  LambdaRole:
+    Type: AWS::IAM::Role
+    DependsOn: [ DynamoDb, S3WorkingStorage ]
+    Properties:
+      RoleName: !Join [ '-', [ !Ref AWS::StackName,'lambda', !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ] ] ]
+      AssumeRolePolicyDocument:
+        Statement: [ { Action: sts:AssumeRole, Principal: { Service: lambda.amazonaws.com }, Effect: Allow } ]
+        Version: 2012-10-17
+      Policies:
+        - PolicyName: !Join [ '-', [ !Ref AWS::StackName,'lambda', !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ] ] ]
+          PolicyDocument:
+            Version: '2012-10-17'
+            Statement:
+              - { Action: dynamodb:*, Resource: !GetAtt DynamoDb.Arn, Effect: Allow }
+              - { Action: s3:*,                               Resource: !Join [ '', [ !GetAtt S3WorkingStorage.Arn, '*' ] ],        Effect: Allow }
+              - { Action: sns:*,                              Resource: !Sub 'arn:aws:sns:*:${AWS::AccountId}:${AWS::StackName}*',  Effect: Allow }
+              - { Action: logs:*,                             Resource: !Sub 'arn:aws:logs:${AWS::Region}:${AWS::AccountId}:*',     Effect: Allow }
+              - { Action: lambda:*,    Resource: !Sub 'arn:aws:lambda:${AWS::Region}:${AWS::AccountId}:function:${AWS::StackName}', Effect: Allow }
+              - { Action: execute-api:ManageConnections,      Resource: arn:aws:execute-api:*:*:*/@connections/*,                   Effect: Allow }
+              - { Action: [ s3:GetObject, s3:PutObject ],     Resource: arn:aws:s3:::ngin.stackops*/* ,                             Effect: Allow }
+              - { Action: s3:GetObject,                       Resource: arn:aws:s3:::ngin.stackops.releases/*,                      Effect: Allow }
+              - { Action: cloudformation:GetTemplateSummary , Resource: '*',                                                        Effect: Allow }
+              - { Action: sts:AssumeRole,                     Resource: arn:aws:iam::*:role/*,                                      Effect: Allow }
+  S3Policy:
+    Type: AWS::S3::BucketPolicy
+    DependsOn: [ S3WorkingStorage, LambdaRole ]
+    Properties:
+      Bucket: !Ref S3WorkingStorage
+      PolicyDocument:
+        Version: 2012-10-17
+        Statement:
+          - Action: s3:*
+            Resource: !Join [ '', [ !GetAtt S3WorkingStorage.Arn, '/*' ] ]
+            Effect: Allow
+            Principal:
+              AWS: [ !GetAtt LambdaRole.Arn ]
+  StackOpsAccessRole:
+    Type:      AWS::IAM::Role
+    DependsOn: ApiGateway2Websocket
+    Properties:
+      RoleName: !Join [ '-', [ !Ref AWS::StackName,'access', !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ] ] ]
+      MaxSessionDuration: 43200
+      AssumeRolePolicyDocument:
+        Statement: [ { Principal: { AWS: !Ref AuthorizedUserArns }, Action: sts:AssumeRole, Effect: Allow } ]
+        Version: 2012-10-17
+      Policies:
+        - PolicyName: !Join [ '-', [ !Ref AWS::StackName,'accesspolicy', !Select [ 2, !Split [ '/', !Ref AWS::StackId ] ] ] ]
+          PolicyDocument:
+            Version: 2012-10-17
+            Statement:
+              - Action:        execute-api:Invoke
+                Resource: !Sub 'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway2Websocket}/live/*'
+                Effect:        Allow
+  LambdaLogGroup:
+    Type: AWS::Logs::LogGroup
+    Properties:
+      LogGroupName: !Sub '/aws/lambda/${AWS::StackName}'
+      RetentionInDays:   1
+  LambdaFn:
+    Type: AWS::Lambda::Function
+    DependsOn: [ ApiGatewayRest, StackOpsAccessRole, LambdaLogGroup ]
+    Properties:
+      FunctionName: !Ref AWS::StackName
+      Runtime:           nodejs20.x
+      MemorySize:        1024
+      Code:
+        S3Bucket: !Sub 'ngin.stackops.${AWS::Region}'
+        S3Key: !If [ UseLatestLambdaCode, lambda.zip, !Join [ "/", [ !Ref StackOpsVersion , lambda.zip ] ] ]
+      Handler:           server.handler
+      Role: !GetAtt      LambdaRole.Arn
+      Timeout:           120
+      Environment:
+        Variables:
+          AWSRegion: !Ref              AWS::Region
+          AccessRole: !GetAtt          StackOpsAccessRole.Arn
+          DynamoDbTable: !Ref          DynamoDb
+          ExecutionRole: !GetAtt       LambdaRole.Arn
+          HttpsDomain: !Sub            'https://${ApiGatewayRest}.execute-api.${AWS::Region}.amazonaws.com/live'
+          LambdaAwsAccountNumber: !Ref AWS::AccountId
+          LambdaName: !Ref             AWS::StackName
+          LicenseKey: !Ref             ApplicationLicenseKey
+          LogData: !Ref                LogData
+          LogLevelServer: !Ref         LogLevelServer
+          LogLevelUI: !Ref             LogLevelUI
+          S3WorkingStorage: !Ref       S3WorkingStorage
+          WssDomain: !Sub              'https://${ApiGateway2Websocket}.execute-api.${AWS::Region}.amazonaws.com/live'
+  EventsRuleLambdaChron:
+    Type: AWS::Events::Rule
+    Properties:
+      Name: !Ref          AWS::StackName
+      Description:        Triggers Lambda each minute to run scheduled jobs
+      ScheduleExpression: rate(1 minute)
+      State:              ENABLED
+      Targets: [ { Arn: !GetAtt LambdaFn.Arn, Id: !Ref     AWS::StackName, Input: !Sub '{"source" : "${AWS::StackName}lambdachron"}' } ]
+  LambdaPermissionEvents:
+    Type:      AWS::Lambda::Permission
+    DependsOn: LambdaFn
+    Properties:
+      Action:            lambda:InvokeFunction
+      FunctionName: !Ref LambdaFn
+      Principal:         events.amazonaws.com
+      SourceArn: !GetAtt EventsRuleLambdaChron.Arn
+  LambdaPermissionApiGwRest:
+    Type: AWS::Lambda::Permission
+    DependsOn: [ LambdaFn, ApiGatewayRest ]
+    Properties:
+      Action:            lambda:InvokeFunction
+      FunctionName: !Ref LambdaFn
+      Principal:         apigateway.amazonaws.com
+      SourceArn: !Sub    'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGatewayRest.RestApiId}/*'
+  LambdaPermissionApiGwWebsocket:
+    Type: AWS::Lambda::Permission
+    DependsOn: [ LambdaFn, ApiGateway2Websocket ]
+    Properties:
+      Action:            lambda:InvokeFunction
+      FunctionName: !Ref LambdaFn
+      Principal:         apigateway.amazonaws.com
+      SourceArn: !Sub    'arn:aws:execute-api:${AWS::Region}:${AWS::AccountId}:${ApiGateway2Websocket.ApiId}/*'
+  LambdaPermissionCodeCommit:
+    Type:      AWS::Lambda::Permission
+    DependsOn: LambdaFn
+    Properties:
+      Action:            lambda:InvokeFunction
+      FunctionName: !Ref LambdaFn
+      Principal:         codecommit.amazonaws.com
+  LambdaPermissionSns:
+    Type:      AWS::Lambda::Permission
+    DependsOn: LambdaFn
+    Properties:
+      Action:             lambda:InvokeFunction
+      FunctionName: !Ref  LambdaFn
+      Principal:          '*'
+      SourceAccount: !Ref AWS::AccountId
+  ApiGatewayRest:
+    Type: AWS::ApiGateway::RestApi
+    Properties: { Name: !Ref AWS::StackName, BinaryMediaTypes: [ '*/*' ] }
+  ApiGatewayMethod:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref     ApiGatewayRest
+      HttpMethod:         GET
+      AuthorizationType:  NONE
+      ResourceId: !GetAtt ApiGatewayRest.RootResourceId
+      Integration:
+        Type:                  AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub              'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFn.Arn}/invocations'
+  ApiGatewayResource:
+    Type: AWS::ApiGateway::Resource
+    Properties:
+      ParentId: !GetAtt ApiGatewayRest.RootResourceId
+      PathPart:         '{proxy+}'
+      RestApiId: !Ref   ApiGatewayRest
+  ApiGatewayMethod2:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref    ApiGatewayRest
+      HttpMethod:        ANY
+      AuthorizationType: NONE
+      ResourceId: !Ref   ApiGatewayResource
+      Integration:
+        Type:                  AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub              'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFn.Arn}/invocations'
+  ApiGatewayMethod3:
+    Type: AWS::ApiGateway::Method
+    Properties:
+      RestApiId: !Ref     ApiGatewayRest
+      HttpMethod:         POST
+      AuthorizationType:  NONE
+      ResourceId: !GetAtt ApiGatewayRest.RootResourceId
+      Integration:
+        Type:                  AWS_PROXY
+        IntegrationHttpMethod: POST
+        Uri: !Sub              'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFn.Arn}/invocations'
+  ApiGatewayDeployment:
+    Type:      AWS::ApiGateway::Deployment
+    DependsOn: ApiGatewayMethod
+    Properties: { RestApiId: !Ref ApiGatewayRest, StageName: live }
+  ApiGateway2Websocket:
+    Type: AWS::ApiGatewayV2::Api
+    Properties: { Name: !Sub '${AWS::StackName}ws', ProtocolType: WEBSOCKET, RouteSelectionExpression: $request.body.action }
+  ApiGateway2Integration:
+    Type: AWS::ApiGatewayV2::Integration
+    Properties:
+      ApiId: !Ref          ApiGateway2Websocket
+      ConnectionType:      INTERNET
+      IntegrationType:     AWS_PROXY
+      IntegrationUri: !Sub 'arn:aws:apigateway:${AWS::Region}:lambda:path/2015-03-31/functions/${LambdaFn.Arn}/invocations'
+      TimeoutInMillis:     29000
+  ApiGateway2RouteDefault:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref                       ApiGateway2Websocket
+      OperationName:                    DefaultRoute
+      RouteKey:                         $default
+      RouteResponseSelectionExpression: $default
+      AuthorizationType:                NONE
+      Target: !Sub                      'integrations/${ApiGateway2Integration}'
+  ApiGateway2ConnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref        ApiGateway2Websocket
+      OperationName:     ConnectRoute
+      RouteKey:          $connect
+      AuthorizationType: AWS_IAM
+      Target: !Sub       'integrations/${ApiGateway2Integration}'
+  ApiGateway2DisconnectRoute:
+    Type: AWS::ApiGatewayV2::Route
+    Properties:
+      ApiId: !Ref        ApiGateway2Websocket
+      OperationName:     DisconnectRoute
+      RouteKey:          $disconnect
+      AuthorizationType: NONE
+      Target: !Sub       'integrations/${ApiGateway2Integration}'
+  ApiGateway2Deployment:
+    Type: AWS::ApiGatewayV2::Deployment
+    DependsOn: [ ApiGateway2RouteDefault, ApiGateway2ConnectRoute, ApiGateway2DisconnectRoute ]
+    Properties: { ApiId: !Ref ApiGateway2Websocket }
+  ApiGateway2Stage:
+    Type: AWS::ApiGatewayV2::Stage
+    Properties:
+      StageName:         live
+      ApiId: !Ref        ApiGateway2Websocket
+      DeploymentId: !Ref ApiGateway2Deployment
+      DefaultRouteSettings: { DetailedMetricsEnabled: false, DataTraceEnabled: false, ThrottlingBurstLimit: 100, ThrottlingRateLimit: 100 }
+Outputs:
+  AccessUrl:
+    Description: AWS ApiGateway REST url - click this link to access the application
+    Value: !Sub  'https://${ApiGatewayRest}.execute-api.${AWS::Region}.amazonaws.com/live'
+    Export: { Name: !Join [ ':', [ !Ref 'AWS::StackName', 'AccessUrl' ] ] }
+  ApiGatewayId:
+    Description: 'AWS ApiGatewayId - use this to optionally create a custom domain name for accessing the application using Route53'
+    Value: !Ref  ApiGatewayRest
+    Export: { Name: !Join [ ':', [ !Ref 'AWS::StackName', 'ApiGatewayId' ] ] }
+  RoleAuthorizingAccess:
+    Description:   'AWS IAM Role authorizing access - only IAM users who can assume this role can access the application.'
+    Value: !GetAtt StackOpsAccessRole.Arn
+  PrincipalsAuthorized:
+    Description: 'AWS Principals authorized to access the application - these are added to the trust policy of the RoleAuthorizingAccess.'
+    Value: !Join [ ',', !Ref AuthorizedUserArns ]

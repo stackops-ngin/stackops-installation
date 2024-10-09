@@ -1,0 +1,28 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description:              A template that creates an IAM Role with admin privileges
+Parameters:
+  RoleName:
+    Type:    String
+    Default: 'admin'
+  RolePath:
+    Type:    String
+    Default: '/stackops/'
+  MaxSessionDuration:
+    Type:    Number
+    Default: 43200
+  PrincipalsAuthorized: # this parameter is resolved to the output of the StackOps installation
+    Type: CommaDelimitedList
+Resources:
+  RoleForPrincipals:
+    Type: AWS::IAM::Role
+    Properties:
+      Path:               !Ref RolePath
+      RoleName:           !Ref RoleName
+      MaxSessionDuration: !Ref MaxSessionDuration
+      AssumeRolePolicyDocument:
+        Statement: [ { Principal: { AWS: !Ref PrincipalsAuthorized }, Action: sts:AssumeRole, Effect: Allow } ]
+        Version: 2012-10-17
+      ManagedPolicyArns: [ arn:aws:iam::aws:policy/AdministratorAccess ]
+Outputs:
+  AdminRoleArn:
+    Value: !GetAtt RoleForPrincipals.Arn
